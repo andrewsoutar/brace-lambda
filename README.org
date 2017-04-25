@@ -1,0 +1,144 @@
+#+TITLE: ~brace-lambda~
+#+AUTHOR: Andrew Soutar
+#+EMAIL: andrew@andrewsoutar.com
+#+STARTUP: indent
+
+* Overview
+~brace-lambda~ is an alternative syntax for lambdas. It uses curly braces as
+delimiters, and provides several useful features.
+* Installation
+** Dependencies
+All dependencies are available on ~quicklisp~.
++ ~sbcl~: ~brace-lambda~ requires SBCL, as it utilizes ~sb-walker~ to perform
+  ~%~-expansion. When I get around to it (which may be never), I'll port this to
+  use a more portable code-walker. Patches on this front are welcome, provided
+  they preserve all existing functionality.
++ ~named-readtables~: ~brace-lambda~ uses ~named-readtables~ to provide the readtable for the brace
+  syntax.
++ ~alexandria~
++ ~anaphora~
++ ~f-underscore~
+** Instructions
+The master repository is located at
+[[https://github.com/andrewsoutar/brace-lambda]]. Clone this repository into your
+ASDF tree, and load ~com.andrewsoutar.brace-lambda~. ~brace-lambda~ uses
+~asdf:package-inferred-system~, which requires ASDF3; the version provided with
+any reasonably modern SBCL should be sufficient.
+* Usage
+To enable ~brace-lambda~, do ~(named-readtables:use-readtable
+com.andrewsoutar.brace-lambda:brace-lambda)~. The ~brace-lambda~ syntax is now
+enabled. There are three modes of operation for a brace-wrapped lambda, as
+detailed below.
+** Standard Lambda
+This mode is recognized because the first element inside the braces is a list,
+and there are other forms following. It looks something like this:
+#+BEGIN_SRC common-lisp
+  {(arg1 arg2 &rest other-args) "optional docstring" (do-something-with arg1 arg2) (something-else other-args)}
+#+END_SRC
+In standard lambda mode, the lambda-list is a destructuring-lambda-list, and so
+is more flexible than an ordinary-lambda-list about certain things such as
+nesting. The docstring, if provided, is ignored. The body of the lambda may have
+arbitrary length, and is wrapped in a block named ~nil~ (so that ~return~ can be
+used within the lambda). The snippet above expands to:
+#+BEGIN_SRC common-lisp
+  (lambda (&rest #1=#:args)
+    (destructuring-bind (arg1 arg2 &rest other-args) #1#
+      (block ()
+        (do-something-with arg1 arg2)
+        (something-else other-args))))
+#+END_SRC
+** Expression Lambda
+An expression lambda is recognized when there is a single form inside the
+braces. It is parsed in the same way as a short lambda, below, except that the
+body of the lambda is taken to be the expression itself. (In other words, it is
+not wrapped in a list for evaluation, as the body is with a short lambda.)
+#+BEGIN_SRC common-lisp
+  (funcall {`(foo ,%1 ,@%2)} 1 '(2 3 4))  ; => (foo 1 2 3 4)
+#+END_SRC
+** Short Lambda
+A short lambda is recognized when there are multiple forms inside the braces,
+and the first form is not a list. The body of the lambda is taken to be the list
+of all the forms inside the braces. These forms are wrapped in a block named
+~nil~ so that ~return~ may be used inside the body. The lambda takes an
+arbitrary number of arguments, then performs ~%~-expansion to bind certain
+parameters. (If ~%~-expansion only specifies 2 variables to bind, the lambda may
+be called with more than 2 variables, but never with less.)
+*** Positional ~%~-expansion
+When a symbol which looks like a ~%~, followed by a number ~n~ of arbitrary
+length, is in a position for evaluation, said symbol will be bound to the ~n~^th
+argument to the lambda. For example:
+#+BEGIN_SRC common-lisp
+  (funcall {cons %2 %1} 5 4)              ; => (4 . 5)
+#+END_SRC
+However, to prevent brace-lambdas from shadowing each other, variable bindings
+/start/ at the lowest ~%~-variable which is not bound in the enclosing lexical
+environment. In other words:
+#+BEGIN_SRC common-lisp
+  (let ((%1 'foo))
+    (funcall {cons %1 %2} 'bar))
+  ;;; => '(foo . bar)
+#+END_SRC
+This is because, since ~%1~ is lexically bound outside the ~brace-lambda~ form,
+positional binding *begins at ~%2~*, so ~%2~ is bound to the /first/ argument,
+not the second. To make this work with nested ~brace-lambda~ forms, a given
+~brace-lambda~ will not look into other ~brace-lambda~ forms nested inside of it
+to look for ~%~-arguments to bind. This allows for forms like the following:
+#+BEGIN_SRC common-lisp
+  (funcall {mapcar {cons 'a %2} %1} '(1 2 3 4))
+  ;;; => ((a . 1) (a . 2) (a . 3) (a . 4))
+#+END_SRC
+In the example above, the outer ~brace-lambda~ only binds ~%1~, leaving ~%2~
+free to be bound by the inner ~brace-lambda~.
+
+Additionally, if the first form inside a ~brace-lambda~ is a number (which
+normally cannot appear at the car of an evaluated list), it is stripped out of
+the body. Instead, it specifies the minimum number of positional parameters to
+be bound by that ~brace-lambda~ form. This is useful when a positional parameter
+is taken by an outer ~brace-lambda~, but is used inside a nested ~brace-lambda~.
+In the following code:
+#+BEGIN_SRC common-lisp
+  {mapcar {cons %1 %2} '(foo bar baz)}
+#+END_SRC
+the inner ~brace-lambda~ form ~{cons %1 %2}~ is expanded into a lambda of at
+least two arguments, which is not what is wanted in that position. Instead, if
+you want the first argument to come from the encosing lambda, you can write the
+following:
+#+BEGIN_SRC common-lisp
+  {1 mapcar {cons %1 %2} '(foo bar baz)}
+#+END_SRC
+Now, the outer lambda binds a single parameter, ~%1~, as specified by the ~1~ at
+the head of its body. This argument is passed into the closure ~{cons %1 %2}~,
+which now binds only its first parameter (as ~%2~).
+
+Note that the number at the head of the body is the /minimum/ number of
+parameters to be bound by the lambda. If there are more positional ~%~-arguments
+in its body (excluding nested ~brace-lambda~ forms), more positional
+~%~-arguments will be bound.
+*** ~%%~-expansion
+A variable whose name begins with ~%%~ will be expanded to the ~&rest~ parameter
+(i.e. the remaining arguments after all positional parameters have been
+bound). Note that arbitrary text can follow the ~%%~, so nested ~brace-lambda~
+forms can simply use different names to differentiate their ~%%~-arguments.
+*** ~%*~-expansion
+The variable ~%*~ (pronounced ``splat'', in memory of INTERCAL), is the splice
+parameter. It acts like a ~%%~-parameter in that it binds to the ~&rest~
+argument, but it expands differently: the function call containing the ~%*~-form
+will be translated into a call to ~apply~ which /splices/ the ~%*~ form into the
+list of parameters passed to the function. Note that, because expansion is done
+by the code-walker, the ~%*~-form can be used through macros, because it is only
+expanded onto the /immediately encosing/ function call, and is only expanded
+/when it is evaluated/. (Obviously, ~%*~ cannot be used to splice parameters
+into macros themselves, only into their expansions.) ~%*~ was designed to be
+useful for currying arbitary parameters to the left and right of the parameter
+body.
+#+BEGIN_SRC common-lisp
+  (funcall {list 'foo %1 'baz %* 'end} 'bar 'some 'more 'parameters)
+  ;;; => (foo bar baz some more parameters end)
+#+END_SRC
+* Contributions
+Right now, this software is very ad-hoc; I use it in my projects, but that is
+the only testing it receives. If you have a use-case which doesn't conflict with
+one of mine, submit a pull request. I'll probably accept.
+* Bugs
+What? There are no bugs in this software. But if you find one, report them here
+(on Github).
